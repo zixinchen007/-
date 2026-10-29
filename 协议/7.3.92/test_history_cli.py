@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import unittest
 from unittest.mock import Mock, patch
-from history.models import parse_history_records, history_record_status
+from history.models import RunRecordDetail, parse_history_records, history_record_status
 
 class HistoryCliTests(unittest.TestCase):
     def test_list_and_legacy_envelope(self):
@@ -24,6 +24,22 @@ class HistoryCliTests(unittest.TestCase):
         self.assertEqual(history_record_status({'status':1,'complete':False}),'未达标')
         self.assertEqual(history_record_status({'status':1,'complete':True}),'达标')
         self.assertNotEqual(history_record_status({'status':1}),'达标')
+
+    def test_normal_status_zero_uses_explicit_completion_and_rules(self):
+        row={'rrid':123,'status':0,'complete':True,'isCheat':0,'unCompleteReason':0,
+             'validDis':2400,'reasonList':[{'complete':True,'reason':'配速检查'}]}
+        self.assertIs(RunRecordDetail.from_api_data(row).is_valid,True)
+        self.assertEqual(history_record_status(row),'达标')
+
+    def test_explicit_rejection_and_unknown_states_do_not_pass(self):
+        cases=[({'status':0,'complete':False},False),
+               ({'status':0,'complete':True,'isCheat':1},False),
+               ({'status':0,'complete':True,'reasonList':[{'complete':False}]},False),
+               ({'status':0},None),({'status':9,'complete':True},None)]
+        for row,expected in cases:
+            with self.subTest(row=row):
+                self.assertIs(RunRecordDetail.from_api_data(row).is_valid,expected)
+                self.assertNotEqual(history_record_status(row),'达标')
 
     def test_history_cli_formats_rows_and_handles_bad_payload(self):
         spec=importlib.util.spec_from_file_location('history_test_cli',Path(__file__).with_name('cli.py'))

@@ -5,11 +5,17 @@ import json
 import math
 import time
 import uuid
+from dataclasses import dataclass, replace
 from typing import List, Tuple, Dict, Any, Optional, Union
 
-from .consistency import sample_route, check_track, time_buckets, validate_totals, distance
+from .consistency import sample_route, check_track, time_buckets, validate_totals, distance, route_vertices
 from .config import SPORT_STATIC_SALT
 from .models import GpsPoint, FivePoint, StepBucket, SpeedBucket
+from .obs import map_points
+from .routes import checkpoint_loop
+from .motion import MotionTimeline
+from .motion_v3 import MotionRoute, MotionV3Timeline
+from .route_variation import RouteVariationOptions, VariedRoute, build_varied_route
 
 
 def compute_sport_signature(field_map: Dict[str, Union[str, int, float, bool, None]],
@@ -53,6 +59,24 @@ def gzip_base64_encode(data: Union[str, bytes]) -> str:
     return base64.b64encode(compressed).decode("ascii")
 
 
+@dataclass(frozen=True)
+class PreparedRoute:
+    vertices: tuple
+    stations_m: tuple
+    five_points: tuple
+    variation: Optional[VariedRoute] = None
+
+    @property
+    def motion_route(self):
+        # Use the exact geographic stations used by sampling, with a local
+        # metric projection only for the discrete curvature calculation.
+        lat0, lon0 = self.vertices[0]
+        scale = math.pi * 6371000. / 180
+        xy = tuple(((lon-lon0)*scale*math.cos(math.radians(lat0)),
+                    (lat-lat0)*scale) for lat,lon in self.vertices)
+        return MotionRoute.from_xy(xy, self.stations_m)
+
+
 class RunningTrackBuilder:
     """运动轨迹、传感器步频分桶与 7.3.92 报文组装构建器"""
 
@@ -62,21 +86,20 @@ class RunningTrackBuilder:
         # sport_type: 1 为计分跑（校园考核），6 为自由跑（阳光跑/课外自由锻炼）
         self.sport_type = int(sport_type)
         self.uuid_str = uuid_str or str(uuid.uuid4())
+        self.route_geometry = None
 
-    def generate_track_around_points(self,
-                                    center_lat: float,
-                                    center_lng: float,
-                                    checkpoints: Optional[List[Dict[str, Any]]] = None,
-                                    total_distance_m: int = 2100,
-                                    total_time_sec: int = 760,
-                                    start_time_ms: int = 0) -> Tuple[List[GpsPoint], List[FivePoint]]:
-        """根据模式 (sportType=1 计分跑 vs sportType=6 自由跑) 生成真实平滑的 GPS 坐标序列"""
-        validate_totals(total_time_sec, 0, start_time_ms,
-                        start_time_ms + total_time_sec*1000, total_distance_m)
-        points = []
-
+    def prepare_route(self, center_lat, center_lng, checkpoints=None,
+                      total_distance_m=2100, route_loop=None, route_variation=None, seed=None):
+        """Prepare the final finite path before motion; no clients or I/O."""
+        variation = None
+        if route_variation is not None:
+            route_variation.validate()
+            if route_variation.max_offset_m > 0 and route_loop is None:
+                raise ValueError('路线微变需要显式跑道')
         waypoints = []
         five_points = []
+        if route_loop is not None and self.sport_type == 1 and not checkpoints:
+            raise ValueError('显式跑道模式缺少官方点位，停止生成')
         
         # 1. 计分跑 (sportType=1)：必须绑定打卡点
         if self.sport_type == 1 and checkpoints and len(checkpoints) > 0:
@@ -123,10 +146,49 @@ class RunningTrackBuilder:
         # Fixed checkpoint coordinates are never moved to fit the target.
         if five_points:
             waypoints = [(point.lat, point.lon) for point in five_points]
-        samples = sample_route(waypoints, total_distance_m, total_time_sec, start_time_ms,
-                               require_all=bool(five_points))
+        if route_loop is not None:
+            if route_variation is not None and route_variation.max_offset_m > 0:
+                options = route_variation if route_variation.seed is not None else replace(route_variation, seed=seed)
+                variation = build_varied_route(route_loop, five_points, total_distance_m, options)
+                waypoints = variation.points
+            else:
+                waypoints = checkpoint_loop(route_loop, five_points, total_distance_m)
+        vertices, stations = route_vertices(waypoints, total_distance_m,
+                                            require_all=bool(five_points) and route_loop is None)
+        return PreparedRoute(vertices, stations, tuple(five_points), variation)
+
+    def generate_track_around_points(self,
+                                    center_lat: float,
+                                    center_lng: float,
+                                    checkpoints: Optional[List[Dict[str, Any]]] = None,
+                                    total_distance_m: int = 2100,
+                                    total_time_sec: int = 760,
+                                    start_time_ms: int = 0,
+                                    route_loop: Optional[List[Tuple[float, float]]] = None,
+                                    timeline: Optional[MotionTimeline | MotionV3Timeline] = None,
+                                    route_variation: Optional[RouteVariationOptions] = None,
+                                    prepared_route: Optional[PreparedRoute] = None) -> Tuple[List[GpsPoint], List[FivePoint]]:
+        """根据模式 (sportType=1 计分跑 vs sportType=6 自由跑) 生成真实平滑的 GPS 坐标序列"""
+        validate_totals(total_time_sec, 0, start_time_ms,
+                        start_time_ms + total_time_sec*1000, total_distance_m)
+        points = []
+        self.route_geometry = None
+        if route_variation is not None:
+            route_variation.validate()
+            if route_variation.max_offset_m > 0 and (route_loop is None or timeline is None):
+                raise ValueError('路线微变需要显式跑道和运动时间序列')
+
+        prepared = prepared_route or self.prepare_route(
+            center_lat, center_lng, checkpoints, total_distance_m, route_loop,
+            route_variation, timeline.seed if timeline is not None else None)
+        self.route_geometry = prepared.variation
+        five_points = list(prepared.five_points)
+        samples = sample_route(prepared.vertices, total_distance_m, total_time_sec, start_time_ms,
+                               timeline=timeline, prepared_vertices=(prepared.vertices, prepared.stations_m))
         for index, (lat, lon, timestamp) in enumerate(samples):
-            if index:
+            if timeline is not None:
+                speed = timeline.speed_at(timestamp - start_time_ms)
+            elif index:
                 previous = samples[index-1]
                 speed = distance(previous[:2], (lat, lon))*1000/(timestamp-previous[2])
             else:
@@ -135,6 +197,15 @@ class RunningTrackBuilder:
                                    speed=speed, accuracy=3.0, isValid=True))
         check_track(points, total_distance_m, total_time_sec, start_time_ms,
                     start_time_ms+total_time_sec*1000, five_points)
+        if route_loop is not None:
+            cursor = 0
+            for fixed in five_points:
+                while cursor < len(points) and distance((fixed.lat, fixed.lon),
+                        (points[cursor].lat, points[cursor].lon)) > .1:
+                    cursor += 1
+                if cursor == len(points):
+                    raise ValueError('目标距离不足以沿跑道按顺序经过所有官方点位')
+                cursor += 1
 
         return points, five_points
 
@@ -152,14 +223,18 @@ class RunningTrackBuilder:
                                 avg_power: int = 150,
                                 run_area_id: int = -1,
                                 geo_fences_json: Optional[str] = None,
-                                policy: int = 1) -> Tuple[dict, dict, str]:
+                                policy: int = 1,
+                                timeline: Optional[MotionTimeline] = None) -> Tuple[dict, dict, str]:
         """组装完整的 save/record 报文、OBS 上传大对象与相对路径"""
         validate_totals(total_time_sec, total_steps, start_time_ms, stop_time_ms, total_distance_m)
+        if timeline is not None:
+            timeline.validate_target(total_distance_m, total_time_sec, total_steps)
         check_track(gps_points, total_distance_m, total_time_sec, start_time_ms, stop_time_ms, five_points)
         complete = (total_distance_m >= sel_distance_m) and (total_time_sec >= sel_run_time_s)
         un_complete_reason = 0 if complete else 10
         avg_step_freq = round(total_steps * 60.0 / total_time_sec) if total_time_sec > 0 else 165
-        speed_val = round((total_distance_m / total_time_sec) * 1000) if total_time_sec > 0 else 2600
+        # Record speed is pace in thousandths of a minute/km; GPS speed stays m/s.
+        speed_val = round(total_time_sec / 60 / (total_distance_m / 1000) * 1000)
 
         # 1. 签名参数字典 (严格按照 7.3.92 规则)
         sign_map = {
@@ -203,11 +278,12 @@ class RunningTrackBuilder:
         speed_buckets = []
         step_buckets = []
         for i, (begin, end, count, length) in enumerate(time_buckets(
-                total_time_sec, total_steps, start_time_ms, stop_time_ms, total_distance_m)):
+                total_time_sec, total_steps, start_time_ms, stop_time_ms, total_distance_m, timeline=timeline)):
             speed_buckets.append(SpeedBucket(length, begin, end, queueNum=i + 1))
             step_buckets.append(StepBucket(count, begin, end, queueNum=i + 1))
 
-        all_loc_json = json.dumps([p.to_dict() for p in gps_points], separators=(",", ":"))
+        all_loc_json = json.dumps(map_points(gps_points, start_time_ms, total_time_sec,
+                                            total_distance_m, total_steps, timeline=timeline), separators=(",", ":"))
         five_pt_json = json.dumps([p.to_dict() for p in five_points], separators=(",", ":")) if five_points else "[]"
         # Android CreditRunPIml serializes PointJsonEntity, not the point array.
         # The inner fivePointJson remains a JSON string in this envelope.
@@ -277,7 +353,8 @@ class RunningTrackBuilder:
             "rrid": gzip_base64_encode(""),
             "uid": gzip_base64_encode(str(self.uid)),
             "uuid": gzip_base64_encode(self.uuid_str),
-            "run_data": gzip_base64_encode(all_loc_json),
+            "run_data": gzip_base64_encode(json.dumps(
+                {"allLocJson": all_loc_json, "useZip": False}, separators=(",", ":"))),
             "step_freq_json": gzip_base64_encode(step_json),
             "speed_json": gzip_base64_encode(speed_json),
             "segment_json": gzip_base64_encode("[]"),

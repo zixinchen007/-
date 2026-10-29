@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import argparse
+import json
 import os
+from pathlib import Path
 import sys
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -12,6 +14,9 @@ if cur_dir not in sys.path:
 
 from sport_client import SportClient792
 from history.models import parse_history_records, history_record_status
+from running.motion import MotionOptions
+from running.motion_v3 import MotionV3Options
+from core.local_state import load_session
 
 
 def main():
@@ -26,12 +31,18 @@ def main():
     parser.add_argument("--checkpoints", action="store_true", help="单独查询官方计分跑点位，不上传成绩")
     parser.add_argument("--profile", action="store_true", help="查询学生个人档案")
     parser.add_argument("--history", action="store_true", help="查询最近历史记录与打卡日历")
+    parser.add_argument("--logout", action="store_true", help="退出已有会话，确认失效后清理本地缓存")
+    parser.add_argument("--logout-after-run", action="store_true", help="本次 --run 结束或异常时尝试退出会话")
 
     # 跑步相关选项
     parser.add_argument("--run", action="store_true", help="触发一键全时序跑步与结算")
     parser.add_argument("--mode", type=int, default=1, choices=[1, 6], help="运动类型: 1计分跑 6自由跑")
     parser.add_argument("--distance", type=int, default=2150, help="跑步目标距离 (米，默认 2150)")
     parser.add_argument("--time-sec", type=int, default=760, help="跑步耗时 (秒，默认 760)")
+    parser.add_argument("--route-file", help="显式闭合跑道 JSON（coord_type=bd09，loop 为纬度/经度点列）")
+    parser.add_argument("--motion-model", choices=["jog", "legacy", "v3"], default="jog",
+                        help="运动模型: jog 连续慢跑（默认），legacy 原匀速，v3 实验运动约束模型")
+    parser.add_argument("--seed", type=int, help="连续慢跑随机种子，用于复现同一组运动变化")
 
     # 广告相关选项
     parser.add_argument("--watch-ad", action="store_true", help="模拟看广告与激励视频曝光链路")
@@ -39,16 +50,67 @@ def main():
     parser.add_argument("--ad-duration", type=int, default=15, help="广告观看耗时 (秒，默认 15)")
 
     args = parser.parse_args()
+    if args.logout and any((args.username, args.password, args.sync_time, args.rules,
+                           args.checkpoints, args.profile, args.history, args.run,
+                           args.watch_ad, args.logout_after_run, args.route_file, args.seed is not None)):
+        parser.error('--logout 不能与登录、查询或运行操作组合')
+    if args.logout and (bool(args.token) != bool(args.uid) or (args.unid and not args.token)):
+        parser.error('退出显式会话时必须同时提供 --token 和 --uid')
+    if args.logout_after_run and not args.run:
+        parser.error('--logout-after-run 需要与 --run 一起使用')
+    if args.seed is not None and (not args.run or args.motion_model == "legacy"):
+        parser.error("--seed 仅支持连续慢跑模型的 --run")
 
+    route_loop = None
+    if args.route_file:
+        if not args.run:
+            parser.error("--route-file 需要与 --run 一起使用")
+        try:
+            route = json.loads(Path(args.route_file).read_text(encoding="utf-8-sig"))
+            if not isinstance(route, dict) or route.get("coord_type") != "bd09" or not isinstance(route.get("loop"), list):
+                raise ValueError("需要 coord_type=bd09 和 loop 点列；不能混用高德 GCJ-02 坐标")
+            # Validate the file before any authentication or network operation.
+            from running.routes import checkpoint_loop
+            route_loop = checkpoint_loop(route["loop"], [], args.distance)
+        except (OSError, TypeError, ValueError) as exc:
+            parser.error(f"跑道文件无效: {exc}")
+
+    if args.logout and not args.token and load_session() is None:
+        print('退出完成：本机没有已保存的会话。')
+        return 0
     client = SportClient792(uid=args.uid, token=args.token, unid=args.unid)
+    if args.logout:
+        return _logout(client)
+    code = 0
+    try:
+        code = _execute_actions(args, client, route_loop)
+    finally:
+        if args.logout_after_run and _logout(client) != 0:
+            code = 2
+    return code
+
+
+def _logout(client):
+    try:
+        confirmed = client.logout()
+    except Exception:
+        confirmed = False
+    if confirmed:
+        print('退出完成：会话已失效或没有活动会话；设备标识保留。')
+        return 0
+    print('退出未确认：保留会话以便重试退出；如成绩已提交，请勿重复提交。')
+    return 2
+
+
+def _execute_actions(args, client, route_loop):
 
     # 1. 登录认证
     if args.username and args.password:
         res = client.login(args.username, args.password, progress_callback=print)
         if not res.success:
             print(f"登录失败: code={res.error_code} 原因={res.message}")
-            return
-        print(f"登录成功: token={client.token} uid={client.uid} unid={client.unid}")
+            return 2
+        print('登录成功：会话已保存到本机。')
 
     # 2. 时钟对齐
     if args.sync_time or (not args.rules and not args.checkpoints and not args.profile and not args.history and not args.run and not args.watch_ad):
@@ -130,20 +192,27 @@ def main():
     if args.run:
         if not client.token or not client.uid:
             print("跑步提交: 失败 原因=缺少Token或UID")
+            return 2
         else:
             mode_name = "计分跑" if args.mode == 1 else "自由跑"
             run_res = client.execute_run(
                 target_distance_m=args.distance,
                 target_time_sec=args.time_sec,
                 sport_type=args.mode,
-                progress_callback=print
+                progress_callback=print,
+                route_loop=route_loop,
+                motion_options=(MotionV3Options(seed=args.seed) if args.motion_model == "v3" else
+                                MotionOptions(seed=args.seed) if args.motion_model == "jog" else None)
             )
             if run_res.success:
-                valid_str = "达标" if run_res.is_valid else "未达标"
+                valid_str = "即时回查通过，待App复核" if run_res.is_valid is True else "即时回查未达标" if run_res.is_valid is False else "待核验"
                 print(f"跑步提交: 成功 模式={mode_name} rrid={run_res.rrid} 里程={run_res.total_distance}m 耗时={run_res.total_time}s 状态={valid_str}")
+                print(run_res.message)
             else:
                 print(f"跑步提交: 失败 模式={mode_name} code={run_res.error_code} 原因={run_res.message}")
+                return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

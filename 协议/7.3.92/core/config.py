@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import json
-import uuid
+from .local_state import get_device_id
 
 # 服务端网关主机
 HOST_RUN = "https://run.gxapp.iydsj.com"
@@ -27,7 +27,7 @@ DEFAULT_DEVICE_CONFIG = {
 
 def load_customer_device(config_path: str = None) -> dict:
     dev = dict(DEFAULT_DEVICE_CONFIG)
-    dev["DeviceId"] = uuid.uuid4().hex
+    dev["DeviceId"] = get_device_id()
     if config_path and os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:

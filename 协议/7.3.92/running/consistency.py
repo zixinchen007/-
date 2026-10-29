@@ -51,8 +51,8 @@ def validate_totals(seconds, steps, start, stop, meters):
         raise ValueError("distance must be a finite positive number")
 
 
-def sample_route(waypoints, meters, seconds, start, require_all=True):
-    validate_totals(seconds, 0, start, start + seconds*1000, meters)
+def route_vertices(waypoints, meters, require_all=True):
+    """Prepare the exact finite journey once, before speed constraints."""
     route = []
     for point in waypoints:
         point = coordinate(*point)
@@ -82,16 +82,25 @@ def sample_route(waypoints, meters, seconds, start, require_all=True):
         edge += 1
         if edge > 100000:
             raise ValueError("route has too many segments")
+    return tuple(vertices), tuple(cumulative)
+
+
+def sample_route(waypoints, meters, seconds, start, require_all=True, timeline=None,
+                 prepared_vertices=None):
+    validate_totals(seconds, 0, start, start + seconds*1000, meters)
+    if timeline is not None:
+        timeline.validate_target(meters, seconds)
+    vertices, cumulative = prepared_vertices or route_vertices(waypoints, meters, require_all)
     duration_ms = seconds*1000
     samples = {}
     for elapsed in range(0, duration_ms, 3000):
-        traveled = meters*elapsed/duration_ms
+        traveled = timeline.counters_at(elapsed)[0] if timeline is not None else meters*elapsed/duration_ms
         index = min(len(vertices)-2, max(0, bisect.bisect_right(cumulative, traveled)-1))
         fraction = (traveled-cumulative[index])/(cumulative[index+1]-cumulative[index])
         samples[elapsed] = interpolate(vertices[index], vertices[index+1], fraction)
     corner_times = set()
     for point, traveled in zip(vertices, cumulative):
-        elapsed = round(duration_ms*traveled/meters)
+        elapsed = round(timeline.time_at_distance(traveled) if timeline is not None else duration_ms*traveled/meters)
         if elapsed in corner_times:
             raise ValueError("route corners are too close for millisecond timestamps")
         corner_times.add(elapsed)
@@ -118,12 +127,21 @@ def check_track(points, meters, seconds, start, stop, fixed_points=()):
     return actual
 
 
-def time_buckets(seconds, steps, start, stop, meters):
+def time_buckets(seconds, steps, start, stop, meters, timeline=None):
     validate_totals(seconds, steps, start, stop, meters)
+    if timeline is not None:
+        timeline.validate_target(meters, seconds, steps)
     duration_ms = seconds*1000
     cents = round(meters*100)
     for begin in range(0, duration_ms, 10000):
         end = min(begin+10000, duration_ms)
-        count = steps*end//duration_ms - steps*begin//duration_ms
-        length = (cents*end//duration_ms - cents*begin//duration_ms)/100
+        if timeline is None:
+            count = steps*end//duration_ms - steps*begin//duration_ms
+            length = (cents*end//duration_ms - cents*begin//duration_ms)/100
+        else:
+            d0, s0 = timeline.counters_at(begin)
+            d1, s1 = timeline.counters_at(end)
+            rounding = getattr(timeline, 'round_steps', round)
+            count = rounding(s1) - rounding(s0)
+            length = (round(d1*100) - round(d0*100))/100
         yield start+begin, start+end, count, length

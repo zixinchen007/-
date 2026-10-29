@@ -50,11 +50,27 @@ class RunConsistencyTests(unittest.TestCase):
         self.assertEqual(points[-1].time-points[0].time, 760000)
         self.assertTrue(all(a.time < b.time for a,b in zip(points,points[1:])))
         # OBS and settlement must carry the same data, including bucket remainders.
-        for field, obs_field in [('allLocJson','run_data'), ('fivePointJson','fixed_point_json')]:
-            self.assertEqual(body[field], gzip.decompress(base64.b64decode(obs[obs_field])).decode())
+        wrapped_run_data=json.loads(gzip.decompress(base64.b64decode(obs['run_data'])))
+        self.assertEqual(body['allLocJson'],wrapped_run_data['allLocJson'])
+        self.assertIs(wrapped_run_data['useZip'],False)
+        self.assertEqual(body['fivePointJson'],gzip.decompress(base64.b64decode(obs['fixed_point_json'])).decode())
         for field, obs_field in [('stepsPerTenSec','step_freq_json'), ('speedPerTenSec','speed_json')]:
             decoded=json.loads(gzip.decompress(base64.b64decode(obs[obs_field])))
             self.assertEqual(body[field], decoded)
+
+    def test_record_speed_encodes_pace_in_thousandths_of_minute_per_km(self):
+        # App examples: 2150 m / 12:40 must show 5:53, not 2:50.
+        # The real 2171 m / 18:36 record shows 8:34.
+        cases = ((2150, 760, 2921, 5891, 353),
+                 (2171, 1116, 2047, 8567, 514),
+                 (1000, 360, 1200, 6000, 360),
+                 (2000, 420, 2200, 3500, 210))
+        for meters, seconds, steps, wire_pace, displayed_seconds in cases:
+            with self.subTest(meters=meters, seconds=seconds):
+                _, _, _, body, _ = self.build(seconds=seconds, meters=meters, steps=steps)
+                self.assertEqual(body['speed'], wire_pace)
+                self.assertEqual(round(body['speed'] * 60 / 1000), displayed_seconds)
+                self.assertIn(f'speed={wire_pace}', body['originalSign'].split('&'))
 
     def test_partial_last_bucket_is_contiguous_and_lossless(self):
         for seconds in (1, 7, 10, 11, 31, 761):

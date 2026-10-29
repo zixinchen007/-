@@ -4,12 +4,15 @@
 > **抓包来源**：`xadsmartget.adgain.cn_2026_10_14_23_26_10.har` (登录-跑步) 与 `s.adxvip.com_2026_10_15_09_42_15.har` (已登录打开应用-跑步)  
 > **协议加解密**：NetSecKit 4.2.4 (纯 Python 标准库自研实现，AES-128-CBC + Feistel KDF + RSA PKCS#1 v1.5)
 
+本 fork 的登录、登出、模型选择、离线预览与安装步骤见 [根目录使用说明](../../README.md)。
+默认连续慢跑 `jog`，可显式选择 `legacy` 或实验性 `v3`；主 CLI 支持 `--logout` 和 `--logout-after-run`。
+
 ---
 
 ## 模块化架构
 
 ```text
-D:/Work/运动世界/协议/7.3.92/
+协议/7.3.92/
 ├── core/                    # 通用网络与加密基类 (NetSecKit, tokenSign, BaseClient)
 ├── login/                   # 登录与极验 v4 滑块求解套件
 ├── profile/                 # 个人档案与服务器 GMT 时间对齐套件
@@ -58,8 +61,8 @@ D:/Work/运动世界/协议/7.3.92/
 ## 命令行快速使用
 
 ```powershell
-Set-Location 'D:\Work\运动世界\协议\7.3.92'
-$py = 'D:\Work\运动世界\.venv\Scripts\python.exe'
+Set-Location -LiteralPath '.\协议\7.3.92'
+$py = '.\.venv\Scripts\python.exe'
 
 # 1. 服务端时钟对齐测试
 & $py .\cli.py --sync-time

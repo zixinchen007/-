@@ -3,6 +3,28 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
 
+def record_validity(record) -> Optional[bool]:
+    """Interpret explicit completion/rejection fields, not the status code alone."""
+    if (record.get("complete") is False or record.get("isValid") is False
+            or record.get("isCheat") in (True, 1)):
+        return False
+    try:
+        if int(record.get("unCompleteReason", 0)) != 0:
+            return False
+    except (TypeError, ValueError):
+        return None
+    rules = record.get("reasonList") or []
+    if not isinstance(rules, list) or any(not isinstance(rule, dict) for rule in rules):
+        return None
+    if any(rule.get("complete") is False for rule in rules):
+        return False
+    if rules and any(rule.get("complete") is not True for rule in rules):
+        return None
+    if record.get("isValid") is True or (record.get("complete") is True and record.get("status") in (0, 1)):
+        return True
+    return None
+
+
 @dataclass
 class RunRecordDetail:
     """单次跑步详情模型 (/api/v70320/runnings/get_one_record)"""
@@ -14,7 +36,7 @@ class RunRecordDetail:
     valid_time: int
     calorie: int
     status: int
-    is_valid: bool
+    is_valid: Optional[bool]
     uncomplete_reason: int
     start_time: int
     stop_time: int
@@ -26,8 +48,7 @@ class RunRecordDetail:
     def from_api_data(cls, data: Dict[str, Any]) -> "RunRecordDetail":
         status = int(data.get("status", 0))
         un_reason = int(data.get("unCompleteReason", 0))
-        # status == 1 and unCompleteReason == 0 视为合规达标
-        is_valid = (status == 1 and un_reason == 0)
+        is_valid = record_validity(data)
         return cls(
             rrid=int(data.get("rrid", 0) or data.get("id", 0)),
             sport_type=int(data.get("sportType", 1)),
@@ -66,8 +87,9 @@ def parse_history_records(data):
 
 def history_record_status(record):
     """A normal status alone does not establish that the run was completed."""
-    if record.get("complete") is False or record.get("isValid") is False:
+    validity = record_validity(record)
+    if validity is False:
         return "未达标"
-    if record.get("isValid") is True or (record.get("status") == 1 and record.get("complete") is True):
+    if validity is True:
         return "达标"
     return f"状态码={record.get('status')}"
