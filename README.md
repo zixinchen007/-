@@ -19,6 +19,14 @@
 | V3.2 实验模型 | 按秒前瞻可能漏过秒内急弯 | 按最终路线求解运动约束，检查整秒内的弯点及制动距离，保留独立超限拒绝检查 |
 | 离线预览与测试 | 难以在不登录时检查生成结果 | 可生成 HTML/JSON 对比；测试使用虚构数据和模拟服务响应 |
 
+## 效果展示：Motion V3 + 多圈微变
+
+以下为用户授权公开的手机 App 效果截图，地点文字已遮挡，展示该次路线、数据总览及配速／步频曲线。
+
+| 路线与数据总览 | 配速与步频 |
+| --- | --- |
+| <img src="docs/images/motion-v3-lap-overview.jpg" alt="Motion V3 加多圈微变：路线与跑步数据总览" width="360"> | <img src="docs/images/motion-v3-lap-pace-cadence.jpg" alt="Motion V3 加多圈微变：配速与步频曲线" width="360"> |
+
 ## 环境与安装（Windows PowerShell）
 
 - Python 3.13 为验证环境；Python 核心仅依赖标准库。
@@ -172,7 +180,7 @@ V3 参数未经真人记录校准；模型不保证连续加速度、全程 jerk
 
 ## 发布隐私与许可
 
-本分支只发布源码、测试和通用文档，不包含个人身份、凭据、设备文件、会话、真实轨迹、成绩回执或本机一键技能。项目会话文件与 Windows DPAPI 技能存储不是同一机制；不要把本项目描述成已实现 DPAPI 加密。
+除上方用户明确授权公开、已遮挡地点文字的两张效果截图外，本分支只发布源码、测试和通用文档，不包含个人身份、凭据、设备文件、会话、原始轨迹文件、运行回执或本机一键技能。项目会话文件与 Windows DPAPI 技能存储不是同一机制；不要把本项目描述成已实现 DPAPI 加密。
 
 大部分原有代码沿用上游 MIT 许可。V3 衍生模块单独适用 CC BY-NC 4.0，来源和修改说明见 [THIRD_PARTY_MOTION_V3.md](THIRD_PARTY_MOTION_V3.md) 与 [MOTION_V3_LICENSE.txt](MOTION_V3_LICENSE.txt)，不能将该模块概括为 MIT 许可。
 
