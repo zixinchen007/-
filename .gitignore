@@ -1,4 +1,16 @@
-
-# Python cache
+# Local state, environments and generated artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+.local/
+.venv/
+venv/
+node_modules/
+output/
+.codex-remote-attachments/
+.env
+.env.*
+*.dpapi
+*.log
+*.har
+session.json
+device_id.txt

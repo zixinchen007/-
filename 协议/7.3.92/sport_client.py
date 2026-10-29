@@ -7,6 +7,8 @@ if cur_dir not in sys.path:
     sys.path.insert(0, cur_dir)
 
 from core.config import DEFAULT_DEVICE_CONFIG, load_customer_device
+from core.local_state import load_session, save_session, clear_session
+from profile.config import URL_LOGOUT, URL_USER_INFO
 from login.client import LoginClient
 from login.models import LoginResult
 from profile.client import ProfileClient
@@ -16,6 +18,9 @@ from policy.models import RunRule, GeoFenceArea, SemesterInfo
 from telemetry.client import TelemetryClient
 from running.client import RunningClient
 from running.models import RunningSubmissionResult
+from running.motion import MotionOptions
+from running.motion_v3 import MotionV3Options
+from running.route_variation import RouteVariationOptions
 from history.client import HistoryClient
 from history.models import RunRecordDetail
 from ads.client import AdClient
@@ -30,6 +35,10 @@ class SportClient792:
                  token: Optional[str] = None,
                  unid: Optional[Union[int, str]] = None,
                  device_config: Optional[Dict[str, Any]] = None):
+        if uid is None and token is None and unid is None:
+            session = load_session()
+            if session:
+                uid, token, unid = session["uid"], session["token"], session.get("unid")
         self.device_config = load_customer_device()
         if device_config:
             self.device_config.update(device_config)
@@ -65,7 +74,33 @@ class SportClient792:
         res = self.login_client.login(username, password, progress_callback=progress_callback)
         if res.success and res.user:
             self.set_credentials(uid=res.user.uid, token=res.user.token, unid=res.user.unid)
+            save_session(self.uid, self.token, self.unid)
         return res
+
+    def logout(self) -> bool:
+        """Confirm server invalidation before clearing this session's local state."""
+        if not self.token:
+            return True
+        confirmed = False
+        for _ in range(2):
+            try:
+                self.profile.execute_request('POST', URL_LOGOUT, body_plain={})
+                check = self.profile.execute_request('GET', URL_USER_INFO)
+                if isinstance(check, dict) and check.get('error') in ('Unauthorized', 'UNAUTHORIZED', 401):
+                    confirmed = True
+                    break
+            except Exception:
+                continue
+        if not confirmed:
+            return False
+        try:
+            clear_session(self.uid, self.token)
+        except (OSError, ValueError):
+            return False
+        for client in (self, self.profile, self.policy, self.running,
+                       self.history, self.ads, self.telemetry):
+            client.uid = client.token = client.unid = None
+        return True
 
     # 2. 时间与档案子系统
     def sync_server_time(self) -> ServerTime:
@@ -89,9 +124,13 @@ class SportClient792:
                     target_distance_m: int = 2150,
                     target_time_sec: int = 760,
                     sport_type: int = 1,
-                    progress_callback: Optional[Callable[[str], None]] = None) -> RunningSubmissionResult:
+                    progress_callback: Optional[Callable[[str], None]] = None,
+                    route_loop: Optional[list] = None,
+                    motion_options: Optional[MotionOptions | MotionV3Options] = MotionOptions(),
+                    route_variation: Optional[RouteVariationOptions] = None) -> RunningSubmissionResult:
         """
         全时序拟人跑步提交流程：
+        - 默认使用连续慢跑；显式 motion_options=None 使用原匀速模型。
         - sport_type=1: 计分跑（校园考核，强制经过 5 个必经打卡点与围栏范围）；
         - sport_type=6: 自由跑（阳光跑，自由路线，无需必经打卡点）。
         """
@@ -99,7 +138,10 @@ class SportClient792:
             target_distance_m=target_distance_m,
             target_time_sec=target_time_sec,
             sport_type=sport_type,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            route_loop=route_loop,
+            motion_options=motion_options,
+            route_variation=route_variation
         )
 
     # 5. 看广告与激励视频子系统

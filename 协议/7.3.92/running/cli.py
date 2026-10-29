@@ -13,6 +13,8 @@ for p in [cur_dir, parent_dir]:
         sys.path.insert(0, p)
 
 from running.client import RunningClient
+from running.motion import MotionOptions
+from running.motion_v3 import MotionV3Options
 
 
 def main():
@@ -23,14 +25,20 @@ def main():
     parser.add_argument("-d", "--distance", type=int, default=2150, help="跑步目标距离 (米)")
     parser.add_argument("-s", "--seconds", type=int, default=760, help="跑步总耗时 (秒)")
     parser.add_argument("-m", "--mode", type=int, default=1, choices=[1, 2, 3, 6], help="运动类型: 1计分跑 6自由跑")
+    parser.add_argument("--motion-model", choices=["jog","legacy","v3"], default="jog")
+    parser.add_argument("--seed", type=int)
     args = parser.parse_args()
+    if args.seed is not None and args.motion_model == "legacy":
+        parser.error("--seed 不适用于 legacy")
 
     client = RunningClient(uid=args.uid, token=args.token, unid=args.unid)
     res = client.execute_full_run(
         target_distance_m=args.distance,
         target_time_sec=args.seconds,
         sport_type=args.mode,
-        progress_callback=print
+        progress_callback=print,
+        motion_options=(MotionV3Options(seed=args.seed) if args.motion_model == "v3" else
+                        MotionOptions(seed=args.seed) if args.motion_model == "jog" else None)
     )
 
     mode_name = "计分跑" if args.mode == 1 else "自由跑"
